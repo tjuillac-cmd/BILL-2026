@@ -1,0 +1,72 @@
+# VARIANT ANNOTATION SUMMARY
+============================================================
+
+VCF File: P25-4.trimed1000.snp.vcf
+GFF File: genomic.gff
+BAM File: P25-4.trimed1000.aligned.sorted.bam
+
+VARIANT COUNTS:
+----------------------------------------
+Total Variants: 346
+Quality Filter: QUAL >= 20.0
+Passed Filter: 193 (55.8%)
+Filtered Out: 153 (44.2%)
+Total Gene Features: 450
+Genes with Variants: 186
+
+QUALITY STATISTICS:
+----------------------------------------
+Variants with QUAL score: 346
+Variants without QUAL: 0
+Average QUAL: 21.96
+Min QUAL: 3.35
+Max QUAL: 42.36
+FILTER=PASS: 346
+FILTER=FAIL: 0
+
+VARIANT LOCATIONS (All Variants):
+----------------------------------------
+coding         :   288 ( 83.2%)
+genic          :    34 (  9.8%)
+gene           :    24 (  6.9%)
+exon           :     0 (  0.0%)
+intergenic     :     0 (  0.0%)
+
+VARIANT LOCATIONS (Quality Filtered, QUAL >= 20.0):
+----------------------------------------
+coding         :   167 ( 86.5%)
+genic          :    21 ( 10.9%)
+gene           :     5 (  2.6%)
+exon           :     0 (  0.0%)
+intergenic     :     0 (  0.0%)
+
+COLOR CODING (in BED file):
+----------------------------------------
+🔴 Red    = Coding sequence (CDS)
+🟠 Orange = Exon
+🔵 Blue   = Gene
+🟢 Green  = Other genic region
+⚫ Gray   = Intergenic or low quality
+
+TOP GENES BY VARIANT COUNT:
+----------------------------------------
+DQ657948.1:1..295146          : 193 variants
+id-DQ657948.1:1..22469        :  20 variants
+CyHV3_ORF33                   :  12 variants
+CyHV3_ORF69                   :  11 variants
+CyHV3_ORF68                   :  11 variants
+CyHV3_ORF64                   :  10 variants
+ABG42891.1                    :  10 variants
+CyHV3_ORF89                   :  10 variants
+ABG42916.1                    :  10 variants
+CyHV3_ORF49                   :   9 variants
+ABG42895.1                    :   9 variants
+CyHV3_ORF110                  :   7 variants
+id-DQ657948.1:57..149         :   6 variants
+CyHV3_ORF62                   :   6 variants
+ABG42889.1                    :   6 variants
+CyHV3_ORF75                   :   6 variants
+CyHV3_ORF111                  :   6 variants
+CyHV3_ORF10                   :   5 variants
+ABG42841.1                    :   5 variants
+CyHV3_ORF52                   :   5 variants
