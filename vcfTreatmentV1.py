@@ -29,6 +29,7 @@ def plot_data(values, title, xlabel, output_path, is_vaf=False):
     plt.close()
 
 def main():
+
     parser = argparse.ArgumentParser(description="Analyseur VCF évolutif pour populations virales")
     
     # Entrées/Sorties
@@ -51,9 +52,14 @@ def main():
     parser.add_argument("-merge", action="store_true", help="Fusionne les fichiers en un seul avec trace d'origine")
 
     args = parser.parse_args()
+
+    if len(args.input) > 1 and args.out and not args.merge:
+        print("Attention : Plusieurs fichiers fournis sans l'option -merge.")
+        print("Veuillez activer -merge pour fusionner dans l'output, ou traiter les fichiers un par un.")
+        sys.exit(1)
     
     # Identification automatique basée sur ton format de fichier
-    filename = os.path.basename(args.input).lower()
+    filename = os.path.basename(args.input[0]).lower()
     is_sv = "sv" in filename
     is_snp = "snp" in filename or not is_sv
 
@@ -65,75 +71,92 @@ def main():
         print("Erreur : Les options DV/VAF nécessitent un fichier SV.")
         sys.exit(1)
 
-    # Lecture du fichier
-    try:
-        reader = vcfpy.Reader.from_path(args.input)
-    except Exception as e:
-        print(f"Erreur lecture : {e}")
-        sys.exit(1)
-
+    # Init des compteurs et de la liste pour le plotting
+    total_in, total_out = 0, 0
     data_to_plot = []
     writer = None
+
     if args.out:
-        writer = vcfpy.Writer.from_path(args.out, reader.header)
+        try:
+            with vcfpy.Reader.from_path(args.input[0]) as header_reader:
+                header = header_reader.header
+                # On force le nom de l'échantillon à "SAMPLE" pour le fichier de sortie
+                header.samples.names = ['SAMPLE']
+                if args.merge:
+                    header.add_info_line({'ID': 'ORIGIN', 'Number': '1', 'Type': 'String', 'Description': 'Fichier source du variant'})
+            writer = vcfpy.Writer.from_path(args.out, header)
+        except Exception as e:
+            print(f"Erreur lors de l'initialisation du fichier de sortie : {e}")
+            sys.exit(1)
 
-    count_in, count_out = 0, 0
+    for vcf_file in args.input:
+        with vcfpy.Reader.from_path(vcf_file) as reader:
+            origin_name = os.path.basename(vcf_file).split(".vcf")[0]
+            for record in reader:
+                total_in += 1
 
-    for record in reader:
-        count_in += 1
-        # vcfpy permet d'accéder aux champs par leur nom, plus besoin de split(":")
-        sample = record.calls[0].data
+                # Récupération des valeurs pour le plotting et le filtrage
+                sample = record.calls[0].data
+                gq = float(sample.get('GQ', 0))
+                dv = int(sample.get('DV', 0)) if is_sv else 0
+                dp = int(sample.get('DP', 1)) if is_sv else 1
+
+                # --- Logique de filtrage ---
+                keep = True
+                if is_snp and args.filter_snp and gq < args.filter_snp: keep = False
+                if is_sv and args.filter_sv and dv < args.filter_sv: keep = False
+            
+                # Récupération sécurisée de la VAF
+                vaf_info = record.INFO.get('VAF', 0.0)
+                if isinstance(vaf_info, list):
+                    vaf = float(vaf_info[0])
+                else:
+                    vaf = float(vaf_info)
+
+                # Si VAF est à 0 dans INFO, on tente le calcul via DV/DP (pour Sniffles)
+                if vaf == 0:
+                    vaf = dv / dp if dp > 0 else 0.0
+
+                # Remplissage des données selon l'option choisie
+                if args.distrib_qual: data_to_plot.append(gq)
+                if args.distrib_dv: data_to_plot.append(dv)
+                if args.distrib_vaf: data_to_plot.append(vaf)
+
+                if keep:
+                    total_out += 1
+                    # On renomme l'échantillon dans le record pour correspondre au writer
+                    old_sample_name = record.calls[0].sample
+                    if old_sample_name != 'SAMPLE':
+                        record.call_for_sample['SAMPLE'] = record.call_for_sample.pop(old_sample_name)
+                        record.calls[0].sample = 'SAMPLE'
+
+                    if writer:
+                        if args.merge:
+                            record.INFO['ORIGIN'] = origin_name
+                        writer.write_record(record)
+
+    # Après la boucle "for vcf_file in args.input:"
+    if data_to_plot:
+        # Si un output est défini, on l'utilise comme préfixe, sinon on prend le premier input
+        prefix = args.out.replace(".vcf", "") if args.out else args.input[0].replace(".vcf", "")
         
-        # Récupération des valeurs pour le plotting et le filtrage
-        gq = float(sample.get('GQ', 0))
-        dv = int(sample.get('DV', 0)) if is_sv else 0
-        dp = int(sample.get('DP', 1)) if is_sv else 1
-        # Récupération sécurisée de la VAF
-        vaf_info = record.INFO.get('VAF', 0.0)
-        if isinstance(vaf_info, list):
-            vaf = float(vaf_info[0])
-        else:
-            vaf = float(vaf_info)
-
-        # Si VAF est à 0 dans INFO, on tente le calcul via DV/DP (pour Sniffles)
-        if vaf == 0:
-            vaf = dv / dp if dp > 0 else 0.0
-
-        # Remplissage des données selon l'option choisie
-        if args.distrib_qual: data_to_plot.append(gq)
-        if args.distrib_dv: data_to_plot.append(dv)
-        if args.distrib_vaf: data_to_plot.append(vaf)
-
-        # Logique de filtrage
-        keep = True
-        if is_snp and args.filter_snp and gq < args.filter_snp: keep = False
-        if is_sv and args.filter_sv and dv < args.filter_sv: keep = False
-        
-        if keep:
-            count_out += 1
-            if writer:
-                writer.write_record(record)
+        if args.distrib_qual: 
+            plot_data(data_to_plot, "Qualité (GQ)", "GQ", f"{prefix}_qual.png")
+        if args.distrib_dv: 
+            plot_data(data_to_plot, "Profondeur (DV)", "DV", f"{prefix}_dv.png")
+        if args.distrib_vaf: 
+            plot_data(data_to_plot, "VAF", "VAF", f"{prefix}_vaf.png", is_vaf=True)
 
     # Finalisation
     if writer:
         writer.close()
-        print(f"Filtrage : {count_out}/{count_in} variants conservés dans {args.out}")
+        print(f"Filtrage : {total_out}/{total_in} variants conservés dans {args.out}")
 
     if args.count:
-        # Si un filtre a été activé, on affiche le compte de l'output
-        if args.filter_snp is not None or args.filter_sv is not None:
-            print(f"{count_out} variants ({args.out})")
-        # Sinon, on affiche le compte de l'input
-        else:
-            print(f"{count_in} variants ({args.input})")
+        target = args.out if args.out else "fichiers d'entrée"
+        count_val = total_out if args.out else total_in
+        print(f"{count_val} variants identifiés dans {target}")
 
-    if data_to_plot:
-        prefix = args.input.replace(".vcf", "")
-        if args.distrib_qual: plot_data(data_to_plot, "Distribution Qualité (GQ)", "GQ", f"{prefix}_qual.png")
-        if args.distrib_dv: plot_data(data_to_plot, "Distribution Profondeur (DV)", "DV", f"{prefix}_dv.png")
-        if args.distrib_vaf: plot_data(data_to_plot, "Distribution VAF", "VAF", f"{prefix}_vaf.png", is_vaf=True)
-
-    reader.close()
 
 if __name__ == "__main__":
     main()
