@@ -1,0 +1,14 @@
+name: viral_vcf_env
+channels:
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.12
+  - snpeff=5.1
+  - openjdk=11
+  - pip
+  - pip:
+      - vcfpy
+      - matplotlib
+      - numpy
