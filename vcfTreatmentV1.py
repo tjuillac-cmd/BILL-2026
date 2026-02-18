@@ -4,6 +4,58 @@ import sys
 import os
 import matplotlib.pyplot as plt
 import numpy as np
+import subprocess
+from collections import Counter
+
+def run_snpeff(input_vcf, genome="KHV_U"):
+    config_file = "local_snpeff.config"
+    gff_file = "reference/genes.gff"
+    fasta_file = "reference/sequences.fa"
+    
+    # 1. Vérifier si la base de données SnpEff existe déjà dans ./data/KHV_U
+    db_path = f"./data/{genome}/snpEffectPredictor.bin"
+    
+    if not os.path.exists(db_path):
+        print(f"--- Base de données {genome} introuvable. Construction en cours... ---")
+        # Création de l'arborescence requise par SnpEff
+        os.makedirs(f"data/{genome}", exist_ok=True)
+        # SnpEff attend des noms précis : genes.gff et sequences.fa
+        import shutil
+        shutil.copy(gff_file, f"data/{genome}/genes.gff")
+        shutil.copy(fasta_file, f"data/{genome}/sequences.fa")
+        
+        # Commande pour construire la base
+        build_cmd = ["snpEff", "build", "-gff3", "-v", "-noCheckCds", "-noCheckProtein", "-c", config_file, genome]
+        subprocess.run(build_cmd, check=True)
+
+    # 2. Lancer l'annotation
+    output_ann = input_vcf.replace(".vcf", ".ann.vcf")
+    print(f"--- Annotation de {input_vcf} ---")
+    ann_cmd = ["snpEff", "ann", "-noStats", "-c", config_file, genome, input_vcf]
+    
+    with open(output_ann, "w") as out_f:
+        subprocess.run(ann_cmd, stdout=out_f, check=True)
+    
+    return output_ann
+
+def get_detailed_annotations(all_records):
+    """Extrait les détails des annotations pour le résumé textuel."""
+    detailed_ann = []
+    for r in all_records:
+        if 'ANN' in r.INFO:
+            for ann in r.INFO['ANN']:
+                parts = ann.split('|')
+                if len(parts) >= 11:
+                    detailed_ann.append({
+                        'pos': r.POS,
+                        'ref': r.REF,
+                        'alt': r.ALT[0].value if hasattr(r.ALT[0], 'value') else r.ALT[0],
+                        'effect': parts[1],
+                        'impact': parts[2],
+                        'gene': parts[3],
+                        'aa_change': parts[10]
+                    })
+    return detailed_ann
 
 def plot_data(values, title, xlabel, output_path, is_vaf=False):
     """Génère un graphique basé sur tes styles (hist ou bar)."""
@@ -19,14 +71,12 @@ def plot_data(values, title, xlabel, output_path, is_vaf=False):
 
     mean_val = sum(values) / len(values) if values else 0
     ax.axvline(mean_val, color="red", linestyle="--", label=f"Moyenne : {mean_val:.2f}")
-    
     ax.set_title(title)
     ax.set_xlabel(xlabel)
     ax.set_ylabel("Nombre de variants")
     ax.legend()
     fig.tight_layout()
     plt.savefig(output_path, dpi=150)
-    print(f"Graphique généré : {output_path}")
     plt.close()
 
 def main():
@@ -37,6 +87,10 @@ def main():
     parser.add_argument("-i", "--input", required=True, nargs='+', help="Fichier(s) VCF d'entrée (un ou plusieurs)")    
     parser.add_argument("-o", "--out", help="Fichier de sortie filtré")
     
+    # Options SnpEff
+    parser.add_argument("--annotate", action="store_true", help="Lance l'annotation SnpEff (nécessite snpEff installé via conda)")
+    parser.add_argument("--genome", default="KHV_U", help="Génome de référence pour snpEff (default: KHV_U)")
+
     # Options de filtrage
     parser.add_argument("--filter-snp", type=float, help="Seuil de qualité GQ pour SNP")
     parser.add_argument("--filter-sv", type=int, help="Seuil de profondeur DV pour SV")
@@ -57,6 +111,14 @@ def main():
     parser.add_argument("--add-vaf", action="store_true", help="Affiche la VAF moyenne et l'écart-type sur le graphique de comparaison")
 
     args = parser.parse_args()
+
+    # --- 1. DÉFINITION DU PRÉFIXE (Pour éviter UnboundLocalError) ---
+    if args.out:
+        prefix = args.out.replace(".vcf", "")
+    else:
+        prefix = os.path.basename(args.input[0]).split(".")[0]
+
+    generated_files = [] # Liste pour stocker les noms des fichiers créés
 
     if len(args.input) > 1 and args.out and not args.merge:
         print("Attention : Plusieurs fichiers fournis sans l'option -merge.")
@@ -104,10 +166,26 @@ def main():
             sys.exit(1)
 
     for vcf_file in args.input:
+        # Annotation SnpEff si demandé (on annotera avant de filtrer pour garder les impacts même sur les variants filtrés)
+        if args.annotate:
+            vcf_file = run_snpeff(vcf_file, genome=args.genome)
+
         with vcfpy.Reader.from_path(vcf_file) as reader:
             origin_name = os.path.basename(vcf_file).split(".")[0]
+
+            # Ajout manuel de la définition ANN si manquante dans le header pour vcfpy
+            if args.annotate and 'ANN' not in reader.header.info_ids():
+                reader.header.add_info_line({'ID': 'ANN', 'Number': '.', 'Type': 'String', 'Description': 'Functional annotations'})
+
             for record in reader:
                 total_in += 1
+
+                # --- Logique d'Impact SnpEff ---
+                record.impact = "UNKNOWN"
+                if 'ANN' in record.INFO:
+                    first_ann = record.INFO['ANN'][0].split('|')
+                    if len(first_ann) > 2:
+                        record.impact = first_ann[2] # HIGH, MODERATE, etc.
 
                 # Récupération des valeurs pour le plotting et le filtrage
                 sample = record.calls[0].data
@@ -129,6 +207,14 @@ def main():
 
                 record.temp_vaf = vaf # On stocke la valeur temporairement dans l'objet
                 
+                # PARSING DES ANNOTATIONS SnpEff (Champ ANN)
+                record.impact = "UNKNOWN"
+                if 'ANN' in record.INFO:
+                    # On prend le premier impact de la liste d'annotations
+                    first_ann = record.INFO['ANN'][0].split('|')
+                    if len(first_ann) > 2:
+                        record.impact = first_ann[2] # HIGH, MODERATE, LOW, MODIFIER
+
                 # Si VAF est à 0 dans INFO, on tente le calcul via DV/DP (pour Sniffles)
                 if vaf == 0:
                     vaf = dv / dp if dp > 0 else 0.0
@@ -151,6 +237,67 @@ def main():
                         if args.merge:
                             record.INFO['ORIGIN'] = origin_name
                         writer.write_record(record)
+
+    # Finalisation des opérations
+    if writer:
+        writer.close()
+        generated_files.append(args.out)
+        if args.filter_snp or args.filter_sv:
+            print(f"Filtrage : {total_out}/{total_in} variants conservés dans {args.out}")
+
+    # Graphiques et summary
+
+    if args.annotate and all_records:
+        # Utilisation de Counter (nécessite 'from collections import Counter' en haut du script)
+        impact_counts = Counter([r.impact for r in all_records])
+        if impact_counts:
+            labels = impact_counts.keys()
+            sizes = impact_counts.values()
+            colors_map = {'HIGH': '#d62728', 'MODERATE': '#ff7f0e', 'LOW': '#2ca02c', 'MODIFIER': '#1f77b4', 'UNKNOWN': '#7f7f7f'}
+            
+            fig, ax = plt.subplots(figsize=(8, 8))
+            ax.pie(sizes, labels=labels, autopct='%1.1f%%', startangle=140, 
+                   colors=[colors_map.get(l, '#7f7f7f') for l in labels])
+            ax.set_title(f"Répartition des impacts fonctionnels\n({len(all_records)} variants)")
+            
+            pie_output = f"{prefix}_impacts_pie.png"
+            plt.savefig(pie_output, dpi=150)
+            generated_files.append(pie_output)
+
+    # GÉNÉRATION DU RÉSUMÉ TEXTUEL
+    if args.annotate and all_records:
+        details = get_detailed_annotations(all_records)
+        summary_file = f"{prefix}_summary.txt"
+        
+        # Calcul des compteurs
+        eff_counts = Counter([d['effect'] for d in details])
+        imp_counts = Counter([d['impact'] for d in details])
+        gene_counts = Counter([d['gene'] for d in details if d['gene']])
+
+        try:
+            with open(summary_file, 'w') as out:
+                out.write(f"ANALYSE DÉTAILLÉE DES VARIANTS : {prefix}\n\n")
+                out.write(f"Total variants : {len(all_records)}\n")
+                out.write(f"Total annotations : {len(details)}\n\n")
+
+                out.write("DISTRIBUTION DES IMPACTS :\n")
+                for imp, count in imp_counts.most_common():
+                    out.write(f"{imp:15} : {count} ({count/len(details)*100:.1f}%)\n")
+
+                out.write("\nGÈNES LES PLUS AFFECTÉS :\n")
+                for gene, count in gene_counts.most_common(15):
+                    out.write(f"{gene:25} : {count} variants\n")
+
+                out.write("\nDÉTAILS DES VARIANTS (Impacts HIGH et MODERATE) :\n")
+                out.write("Pos\tRef>Alt\tEffet\tImpact\tGène\tAA_Change\n")
+                # On filtre pour ne pas surcharger le fichier avec les MODIFIER/LOW
+                for d in details:
+                    if d['impact'] in ['HIGH', 'MODERATE']:
+                        out.write(f"{d['pos']}\t{d['ref']}>{d['alt']}\t{d['effect']}\t{d['impact']}\t{d['gene']}\t{d['aa_change']}\n")
+
+            generated_files.append(summary_file)
+        except Exception as e:
+            print(f"Erreur lors de l'écriture du résumé : {e}")
 
     if args.compare:
         o1, o2 = args.compare
@@ -204,7 +351,7 @@ def main():
         plt.title(f"Comparaison de populations : {o1} vs {o2}")
         output_name = f"compare_{o1}_{o2}.png"
         plt.savefig(output_name, dpi=150)
-        print(f"Graphique généré : {output_name}")
+        generated_files.append(output_name)
 
     if data_to_plot:
         # Si un output est défini, on l'utilise comme préfixe, sinon on prend le premier input
@@ -217,16 +364,17 @@ def main():
         if args.distrib_vaf: 
             plot_data(data_to_plot, "VAF", "VAF", f"{prefix}_vaf.png", is_vaf=True)
 
-    # Finalisation
-    if writer:
-        writer.close()
-        print(f"Filtrage : {total_out}/{total_in} variants conservés dans {args.out}")
-
     if args.count:
         target = args.out if args.out else "fichiers d'entrée"
         count_val = total_out if args.out else total_in
         print(f"{count_val} variants identifiés dans {target}")
 
+    # --- AFFICHAGE FINAL ---
+    if generated_files:
+        print("\nTraitement terminé avec succès")
+        print("Fichiers générés :")
+        for f in generated_files:
+            print(f" - {f}")
 
 if __name__ == "__main__":
     main()
