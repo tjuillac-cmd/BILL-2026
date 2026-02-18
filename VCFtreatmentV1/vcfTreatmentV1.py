@@ -1,3 +1,4 @@
+from matplotlib.pylab import sample
 import vcfpy
 import argparse
 import sys
@@ -5,7 +6,47 @@ import os
 import matplotlib.pyplot as plt
 import numpy as np
 import subprocess
+import math
+from matplotlib_venn import venn2, venn3
 from collections import Counter
+
+def plot_venn(all_records, origins, prefix):
+    """Génère un diagramme de Venn transparent pour 2 ou 3 échantillons."""
+    variant_sets = {}
+    for org in origins:
+        variant_sets[org] = set(
+            f"{r.CHROM}_{r.POS}_{r.REF}_{r.ALT[0].value}" 
+            if hasattr(r.ALT[0], 'value') else f"{r.CHROM}_{r.POS}_{r.REF}_{r.ALT[0]}"
+            for r in all_records if r.INFO.get('ORIGIN') == org
+        )
+
+    plt.figure(figsize=(10, 8))
+    
+    # Définition des couleurs (RVB)
+    # Exemple : Rouge, Bleu, Vert
+    custom_colors = ('red', 'blue', 'green')
+    
+    if len(origins) == 2:
+        venn2(
+            subsets=[variant_sets[origins[0]], variant_sets[origins[1]]], 
+            set_labels=origins,
+            set_colors=custom_colors[:2], 
+        )
+    elif len(origins) == 3:
+        venn3(
+            subsets=[variant_sets[origins[0]], variant_sets[origins[1]], variant_sets[origins[2]]], 
+            set_labels=origins,
+            set_colors=custom_colors,
+        )
+    else:
+        plt.close()
+        return None
+
+    plt.title(f"Intersections des variants\n({prefix})", fontsize=14)
+    output_name = f"{prefix}_venn.png"
+    plt.savefig(output_name, dpi=150)
+    plt.close()
+    return output_name
 
 def run_snpeff(input_vcf, genome="KHV_U"):
     config_file = "local_snpeff.config"
@@ -99,6 +140,7 @@ def main():
     parser.add_argument("--distrib-qual", action="store_true", help="Distribution GQ (SNP uniquement)")
     parser.add_argument("--distrib-dv", action="store_true", help="Distribution DV (SV uniquement)")
     parser.add_argument("--distrib-vaf", action="store_true", help="Distribution VAF (SV uniquement)")
+    parser.add_argument("--venn", action="store_true", help="Génère un diagramme de Venn (2-3 échantillons)")
 
     # Option de counting
     parser.add_argument("-count", action="store_true", help="Affiche le nombre de variants")
@@ -109,6 +151,9 @@ def main():
     # Option de comparaison entre fichiers
     parser.add_argument("--compare", nargs=2, metavar=('ORIGIN1', 'ORIGIN2'), help="Compare deux origines (ex: P25-4 P25-8)")
     parser.add_argument("--add-vaf", action="store_true", help="Affiche la VAF moyenne et l'écart-type sur le graphique de comparaison")
+
+    # Options de statistiques détaillées
+    parser.add_argument("--statistics", action="store_true", help="Calcule VAF moyenne et Entropie de Shannon")
 
     args = parser.parse_args()
 
@@ -189,8 +234,9 @@ def main():
 
                 # Récupération des valeurs pour le plotting et le filtrage
                 sample = record.calls[0].data
-                gq = float(sample.get('GQ', 0))
-                dv = int(sample.get('DV', 0)) if is_sv else 0
+                # On récupère la valeur, si c'est None ou absent, on utilise 0
+                gq_val = sample.get('GQ')
+                gq = float(gq_val) if gq_val is not None else 0.0                
                 dp = int(sample.get('DP', 1)) if is_sv else 1
 
                 # --- Logique de filtrage ---
@@ -216,8 +262,21 @@ def main():
                         record.impact = first_ann[2] # HIGH, MODERATE, LOW, MODIFIER
 
                 # Si VAF est à 0 dans INFO, on tente le calcul via DV/DP (pour Sniffles)
-                if vaf == 0:
-                    vaf = dv / dp if dp > 0 else 0.0
+                # 1. Initialisation par défaut
+                dv = 0 
+
+                # 2. Récupération sécurisée (en gérant le NoneType comme pour GQ)
+                dv_val = sample.get('DV')
+                if dv_val is not None:
+                    dv = int(dv_val)
+                elif 'AD' in sample: # Alternative pour les SNPs classiques (non SV)
+                    # Souvent AD est une liste [ref_count, alt_count]
+                    ad = sample.get('AD')
+                    if isinstance(ad, list) and len(ad) > 1:
+                        dv = ad[1]
+
+                # 3. Calcul de la VAF
+                vaf = dv / dp if dp > 0 else 0.0
 
                 # Remplissage des données selon l'option choisie
                 if args.distrib_qual: data_to_plot.append(gq)
@@ -235,7 +294,7 @@ def main():
 
                     if writer:
                         if args.merge:
-                            record.INFO['ORIGIN'] = origin_name
+                            record.INFO['ORIGIN'] = [origin_name]
                         writer.write_record(record)
 
     # Finalisation des opérations
@@ -353,6 +412,18 @@ def main():
         plt.savefig(output_name, dpi=150)
         generated_files.append(output_name)
 
+    # --- DIAGRAMME DE VENN ---
+    if args.venn:
+        # On récupère la liste des échantillons uniques présents dans les records
+        available_origins = sorted(list(set(r.INFO.get('ORIGIN') for r in all_records if 'ORIGIN' in r.INFO)))
+        
+        if len(available_origins) >= 2:
+            venn_file = plot_venn(all_records, available_origins, prefix)
+            if venn_file:
+                generated_files.append(venn_file)
+        else:
+            print("Erreur : Il faut au moins 2 origines différentes pour un diagramme de Venn.")
+
     if data_to_plot:
         # Si un output est défini, on l'utilise comme préfixe, sinon on prend le premier input
         prefix = args.out.replace(".vcf", "") if args.out else args.input[0].replace(".vcf", "")
@@ -369,9 +440,41 @@ def main():
         count_val = total_out if args.out else total_in
         print(f"{count_val} variants identifiés dans {target}")
 
+    # --- CALCUL DES STATISTIQUES ---
+    stats_data = ""
+    if args.statistics and all_records:
+        vafs = [r.temp_vaf for r in all_records]
+        
+        # Calcul VAF
+        mean_vaf = np.mean(vafs)
+        std_vaf = np.std(vafs)
+
+        # Calcul Entropie de Shannon pour chaque variant
+        entropies = []
+        for p in vafs:
+            if 0 < p < 1:
+                h = -(p * math.log2(p) + (1 - p) * math.log2(1 - p))
+            else:
+                h = 0.0
+            entropies.append(h)
+        
+        mean_h = np.mean(entropies)
+        std_h = np.std(entropies)
+
+        # Préparation du texte pour le résumé
+        stats_data = (
+            f"\nSTATISTIQUES GÉNÉRALES :\n"
+            f"{'-'*30}\n"
+            f"VAF moyenne       : {mean_vaf:.4f} (± {std_vaf:.4f})\n"
+            f"Entropie Shannon  : {mean_h:.4f} (± {std_h:.4f})\n"
+        )
+
     # --- AFFICHAGE FINAL ---
     if generated_files:
         print("\nTraitement terminé avec succès")
+        # Si stats demandées, on les affiche au terminal
+        if args.statistics:
+            print(stats_data)
         print("Fichiers générés :")
         for f in generated_files:
             print(f" - {f}")
