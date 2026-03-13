@@ -1,0 +1,11 @@
+metric	value
+froid_missense_count	44
+froid_synonymous_count	19
+chaud_missense_count	45
+chaud_synonymous_count	21
+froid_missense_ratio	0.6984126984126984
+chaud_missense_ratio	0.6818181818181818
+chisq_statistic	0.04149095286735723
+chisq_p	0.8385931928343131
+fisher_odds_ratio	1.0800452113521057
+fisher_p	0.8514973989879276

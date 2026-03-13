@@ -1,0 +1,12 @@
+metric	value
+n_paired_diff_condition_4	25
+n_paired_diff_condition_8	25
+median_diff_condition_4	0.0040000000000000036
+median_diff_condition_8	0.006000000000000005
+median_diff_4_minus_8	-0.0020000000000000018
+wilcox_W	268.5
+wilcox_p	0.3985653986867686
+ks_D	0.32
+ks_p	0.14882127230417033
+rank_biserial	-0.1408
+cliffs_delta	-0.1408
